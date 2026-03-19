@@ -74,53 +74,66 @@ def pull_tournament_stats():
             events = sched_data.get('events', [])
             
             for game in events:
-                status = game['competitions'][0]['status']['type']['description']
+                game_id = game['id']
+                summary_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}"
                 
-                # Only pull stats if the game has started or finished
-                if status != "Scheduled":
-                    game_id = game['id']
-                    summary_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}"
+                try:
                     summary_data = requests.get(summary_url).json()
                     
-                    if 'boxscore' in summary_data and 'players' in summary_data['boxscore']:
-                        for team in summary_data['boxscore']['players']:
-                            team_name = team['team']['displayName']
-                            
-                            # Skip if stats array hasn't populated yet
-                            if not team.get('statistics'):
-                                continue
+                    # --- THE FIX: Memorize colleges from pre-game rosters! ---
+                    if 'rosters' in summary_data:
+                        for team_roster in summary_data['rosters']:
+                            team_name = team_roster['team']['displayName']
+                            for player_entry in team_roster.get('roster', []):
+                                athlete_name = player_entry['athlete']['displayName']
+                                college_map[athlete_name] = team_name
+                    # ---------------------------------------------------------
+                    
+                    status = game['competitions'][0]['status']['type']['description']
+                    
+                    # Only pull stats if the game has started or finished
+                    if status != "Scheduled":
+                        if 'boxscore' in summary_data and 'players' in summary_data['boxscore']:
+                            for team in summary_data['boxscore']['players']:
+                                team_name = team['team']['displayName']
                                 
-                            labels = team['statistics'][0]['labels']
-                            
-                            # Find exactly where the stats are in the array
-                            pts_idx = labels.index('PTS') if 'PTS' in labels else -1
-                            reb_idx = labels.index('REB') if 'REB' in labels else -1
-                            ast_idx = labels.index('AST') if 'AST' in labels else -1
-                            
-                            for athlete in team['statistics'][0]['athletes']:
-                                name = athlete['athlete']['displayName']
-                                college_map[name] = team_name # Memorize the college!
+                                # Skip if stats array hasn't populated yet
+                                if not team.get('statistics'):
+                                    continue
+                                    
+                                labels = team['statistics'][0]['labels']
                                 
-                                stats = athlete.get('stats')
-                                if stats and pts_idx != -1:
-                                    try:
-                                        pts = int(stats[pts_idx])
-                                        reb = int(stats[reb_idx])
-                                        ast = int(stats[ast_idx])
-                                    except ValueError:
-                                        pts, reb, ast = 0, 0, 0
-                                        
-                                    all_player_stats.append({
-                                        'athlete_display_name': name,
-                                        'team_short_display_name': team_name,
-                                        'points': pts,
-                                        'rebounds': reb,
-                                        'assists': ast,
-                                        'fantasy_pts': pts + reb + ast,
-                                        'game_id': game_id
-                                    })
-        except Exception as e:
-            continue # If a day fails, just keep going
+                                pts_idx = labels.index('PTS') if 'PTS' in labels else -1
+                                reb_idx = labels.index('REB') if 'REB' in labels else -1
+                                ast_idx = labels.index('AST') if 'AST' in labels else -1
+                                
+                                for athlete in team['statistics'][0]['athletes']:
+                                    name = athlete['athlete']['displayName']
+                                    # Fallback memorization just in case they missed the pre-game roster
+                                    college_map[name] = team_name 
+                                    
+                                    stats = athlete.get('stats')
+                                    if stats and pts_idx != -1:
+                                        try:
+                                            pts = int(stats[pts_idx])
+                                            reb = int(stats[reb_idx])
+                                            ast = int(stats[ast_idx])
+                                        except ValueError:
+                                            pts, reb, ast = 0, 0, 0
+                                            
+                                        all_player_stats.append({
+                                            'athlete_display_name': name,
+                                            'team_short_display_name': team_name,
+                                            'points': pts,
+                                            'rebounds': reb,
+                                            'assists': ast,
+                                            'fantasy_pts': pts + reb + ast,
+                                            'game_id': game_id
+                                        })
+                except Exception:
+                    continue # Skip broken games but keep loop going
+        except Exception:
+            continue # Skip broken dates but keep loop going
             
     # Convert our collected data into a Pandas DataFrame
     if all_player_stats:
