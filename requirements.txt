@@ -1,3 +1,5 @@
 streamlit
 pandas
 sportsdataverse
+setuptools<70.0.0
+xgboost<3.1.0
