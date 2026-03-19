@@ -1,6 +1,6 @@
 import streamlit as st
-import sportsdataverse.mbb as mbb
 import pandas as pd
+import requests
 import os
 import warnings
 
@@ -9,7 +9,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- 1. PAGE SETUP ---
 st.set_page_config(page_title="Rudi Madness", page_icon="🏆", layout="wide")
 st.title("🏆 Live Rudi Madness Tracker")
-st.markdown("Stats and eliminations automatically refresh from live 2026 tournament data.")
+st.markdown("Stats and eliminations automatically refresh directly from the live ESPN scoreboard.")
 
 # --- 2. LOAD ROSTERS FROM LOCAL CSV ---
 @st.cache_data(ttl=300) 
@@ -32,59 +32,103 @@ def load_rosters():
 
 player_to_owner = load_rosters()
 
-# --- 3. THE AUTO-ELIMINATION ENGINE ---
+# --- 3. THE AUTO-ELIMINATION ENGINE (LIVE ESPN FEED) ---
 @st.cache_data(ttl=120)
 def get_eliminated_teams():
-    try:
-        team_df = mbb.load_mbb_team_boxscore(seasons=[2026], return_as_pandas=True)
-        
-        if 'game_date' in team_df.columns:
-            team_df['game_date'] = pd.to_datetime(team_df['game_date'], utc=True, errors='coerce')
-            tourney_start = pd.to_datetime('2026-03-17', utc=True)
-            tourney_games = team_df[team_df['game_date'] >= tourney_start].copy()
+    eliminated = []
+    # Dates for the First Four through the end of the first weekend
+    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
+    
+    for date_str in tourney_dates:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
+        try:
+            data = requests.get(url).json()
+            for event in data.get('events', []):
+                comp = event['competitions'][0]
+                
+                # Check if the game is completely finished
+                if comp['status']['type']['completed']: 
+                    for team in comp['competitors']:
+                        # If the winner flag is False, they are eliminated
+                        if team.get('winner') == False:
+                            eliminated.append(team['team']['displayName'])
+        except:
+            pass
             
-            tourney_games['team_score'] = pd.to_numeric(tourney_games['team_score'], errors='coerce').fillna(0)
-            tourney_games['opponent_team_score'] = pd.to_numeric(tourney_games['opponent_team_score'], errors='coerce').fillna(0)
-            
-            losers = tourney_games[tourney_games['team_score'] < tourney_games['opponent_team_score']]
-            
-            team_col = 'team_short_display_name' if 'team_short_display_name' in losers.columns else 'team_display_name'
-            return losers[team_col].unique().tolist()
-    except Exception as e:
-        pass 
-    return []
+    return list(set(eliminated))
 
 eliminated_teams = get_eliminated_teams()
 
-# --- TEMPORARY DEBUG TEST ---
-#eliminated_teams.append("Duke") 
-
-# --- 4. PLAYER DATA ENGINE ---
+# --- 4. PLAYER DATA ENGINE (LIVE ESPN FEED) ---
 @st.cache_data(ttl=60)
 def pull_tournament_stats():
-    try:
-        df = mbb.load_mbb_player_boxscore(seasons=[2026], return_as_pandas=True)
-        df = df[df['did_not_play'] == False].copy()
-        
-        # --- THE FIX: Memorize colleges from the regular season data ---
-        team_col = 'team_short_display_name' if 'team_short_display_name' in df.columns else 'team_display_name'
-        college_map = df.drop_duplicates(subset=['athlete_display_name']).set_index('athlete_display_name')[team_col].to_dict()
-        
-        # Now we slice the data to only include the tournament
-        if 'game_date' in df.columns:
-            df['game_date'] = pd.to_datetime(df['game_date'], utc=True, errors='coerce')
-            cutoff_time = pd.to_datetime('2026-03-19 14:00:00', utc=True)
-            df = df[df['game_date'] >= cutoff_time].copy()
-        
-        for col in ['points', 'rebounds', 'assists']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    all_player_stats = []
+    college_map = {}
+    
+    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
+    
+    for date_str in tourney_dates:
+        schedule_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
+        try:
+            sched_data = requests.get(schedule_url).json()
+            events = sched_data.get('events', [])
             
-        df['fantasy_pts'] = df['points'] + df['rebounds'] + df['assists']
+            for game in events:
+                status = game['competitions'][0]['status']['type']['description']
+                
+                # Only pull stats if the game has started or finished
+                if status != "Scheduled":
+                    game_id = game['id']
+                    summary_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}"
+                    summary_data = requests.get(summary_url).json()
+                    
+                    if 'boxscore' in summary_data and 'players' in summary_data['boxscore']:
+                        for team in summary_data['boxscore']['players']:
+                            team_name = team['team']['displayName']
+                            
+                            # Skip if stats array hasn't populated yet
+                            if not team.get('statistics'):
+                                continue
+                                
+                            labels = team['statistics'][0]['labels']
+                            
+                            # Find exactly where the stats are in the array
+                            pts_idx = labels.index('PTS') if 'PTS' in labels else -1
+                            reb_idx = labels.index('REB') if 'REB' in labels else -1
+                            ast_idx = labels.index('AST') if 'AST' in labels else -1
+                            
+                            for athlete in team['statistics'][0]['athletes']:
+                                name = athlete['athlete']['displayName']
+                                college_map[name] = team_name # Memorize the college!
+                                
+                                stats = athlete.get('stats')
+                                if stats and pts_idx != -1:
+                                    try:
+                                        pts = int(stats[pts_idx])
+                                        reb = int(stats[reb_idx])
+                                        ast = int(stats[ast_idx])
+                                    except ValueError:
+                                        pts, reb, ast = 0, 0, 0
+                                        
+                                    all_player_stats.append({
+                                        'athlete_display_name': name,
+                                        'team_short_display_name': team_name,
+                                        'points': pts,
+                                        'rebounds': reb,
+                                        'assists': ast,
+                                        'fantasy_pts': pts + reb + ast,
+                                        'game_id': game_id
+                                    })
+        except Exception as e:
+            continue # If a day fails, just keep going
+            
+    # Convert our collected data into a Pandas DataFrame
+    if all_player_stats:
+        df = pd.DataFrame(all_player_stats)
+    else:
+        df = pd.DataFrame(columns=['athlete_display_name', 'team_short_display_name', 'points', 'rebounds', 'assists', 'fantasy_pts', 'game_id'])
         
-        # Return both the live stats AND the college mapping dictionary
-        return df, college_map
-    except Exception as e:
-        return pd.DataFrame(), {}
+    return df, college_map
 
 # Unpack both variables from the function
 live_data, college_map = pull_tournament_stats()
@@ -93,9 +137,9 @@ live_data, college_map = pull_tournament_stats()
 if player_to_owner:
     roster_base = pd.DataFrame(list(player_to_owner.items()), columns=['Player', 'Fantasy Owner'])
     
-    # Instantly assign colleges to everyone on your roster based on the regular season data!
+    # Assign colleges based on ESPN live data
     if college_map:
-        roster_base['College'] = roster_base['Player'].map(college_map).fillna('Unknown College')
+        roster_base['College'] = roster_base['Player'].map(college_map).fillna('TBD (Awaiting Tip-off)')
     else:
         roster_base['College'] = 'TBD (Awaiting Tip-off)'
     
@@ -103,7 +147,6 @@ if player_to_owner:
         drafted_df = live_data[live_data['athlete_display_name'].isin(player_to_owner.keys())].copy()
         
         if not drafted_df.empty:
-            # We don't need to pull college from here anymore, we already have it!
             player_stats = drafted_df.groupby('athlete_display_name').agg(
                 Games_Played=('game_id', 'nunique'),
                 Total_Pts=('points', 'sum'),
@@ -130,7 +173,7 @@ if player_to_owner:
     stat_columns = ['Games_Played', 'Total_Pts', 'Total_Reb', 'Total_Ast', 'Tourney_Score']
     full_player_totals[stat_columns] = full_player_totals[stat_columns].astype(int)
 
-    # The elimination check will now work perfectly because the College name is populated!
+    # Apply elimination tags
     full_player_totals['Status'] = full_player_totals['College'].apply(
         lambda x: "❌ Eliminated" if x in eliminated_teams else "✅ Active"
     )
@@ -146,8 +189,6 @@ if player_to_owner:
         width='stretch', 
         hide_index=False
     )
-    
-    
             
     st.divider()
     
