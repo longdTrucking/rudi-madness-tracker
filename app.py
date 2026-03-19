@@ -59,7 +59,11 @@ if not roster_base.empty:
 @st.cache_data(ttl=120)
 def get_eliminated_teams():
     eliminated = []
-    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
+    tourney_dates = [
+        '20260319', '20260320', '20260321', '20260322', 
+        '20260326', '20260327', '20260328', '20260329', 
+        '20260404', '20260406'
+    ]
     
     for date_str in tourney_dates:
         url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
@@ -83,7 +87,11 @@ eliminated_teams = get_eliminated_teams()
 @st.cache_data(ttl=60)
 def pull_tournament_stats():
     all_player_stats = []
-    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
+    tourney_dates = [
+        '20260319', '20260320', '20260321', '20260322', 
+        '20260326', '20260327', '20260328', '20260329', 
+        '20260404', '20260406'
+    ]
     
     for date_str in tourney_dates:
         schedule_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
