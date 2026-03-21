@@ -3,89 +3,93 @@ import pandas as pd
 import requests
 import os
 import warnings
+import time
 
+# Ignore Pandas future warnings to keep the terminal clean
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# --- GLOBAL CONFIGURATION ---
+# Dates for Round 1 through the National Championship (Skips the First Four)
+TOURNEY_DATES = [
+    '20260319', '20260320', '20260321', '20260322', 
+    '20260326', '20260327', '20260328', '20260329', 
+    '20260404', '20260406'
+]
 
 # --- 1. PAGE SETUP ---
 st.set_page_config(page_title="Rudi Madness", page_icon="🏆", layout="wide")
 st.title("🏆 Live Rudi Madness Tracker")
 st.markdown("Stats and eliminations automatically refresh directly from the live ESPN scoreboard.")
 
-# --- 2. LOAD ROSTERS FROM LOCAL CSV ---
+# --- 2. DATA LOADERS ---
+
 @st.cache_data(ttl=300) 
 def load_rosters():
+    """Loads the fantasy league rosters from a local CSV file."""
     if not os.path.exists("rosters.csv"):
         st.error("⚠️ 'rosters.csv' not found! Please create it in your VSCode folder.")
         return pd.DataFrame()
         
     try:
         df = pd.read_csv("rosters.csv")
+        # Standardize column name
         if 'Fantasy Team' in df.columns:
             df = df.rename(columns={'Fantasy Team': 'Fantasy Owner'})
-        # Strip whitespace just to be safe
+        # Strip invisible whitespace to prevent matching errors
         df['Player'] = df['Player'].astype(str).str.strip()
         return df
     except Exception as e:
         st.error(f"Failed to read 'rosters.csv': {e}")
         return pd.DataFrame()
 
-roster_base = load_rosters()
-
-# --- 3. THE AUTOMATED COLLEGE LOOKUP (RUNS ONCE EVERY 24 HOURS) ---
 @st.cache_data(ttl=86400) 
 def build_college_dictionary():
+    """Builds a Player-to-College mapping using the sportsdataverse historical database. Runs once a day."""
     try:
         import sportsdataverse.mbb as mbb
-        # Pull the regular season database (it has everyone in it!)
         df = mbb.load_mbb_player_boxscore(seasons=[2026], return_as_pandas=True)
         
-        # Keep only the columns we need and drop all the duplicate games
+        # Isolate just the player names and their teams, removing all duplicate game logs
         mapping_df = df[['athlete_display_name', 'team_short_display_name']].drop_duplicates(subset=['athlete_display_name'])
         
-        # Convert it into a lightning-fast Python dictionary
-        college_dict = dict(zip(mapping_df.athlete_display_name, mapping_df.team_short_display_name))
-        return college_dict
+        # Convert to a fast Python dictionary
+        return dict(zip(mapping_df.athlete_display_name, mapping_df.team_short_display_name))
     except Exception as e:
         print(f"Failed to build college dictionary: {e}")
         return {}
 
-college_map = build_college_dictionary()
+# --- 3. ESPN LIVE DATA ENGINES ---
 
-# Apply the automated colleges to your CSV roster!
-if not roster_base.empty:
-    roster_base['College'] = roster_base['Player'].map(college_map).fillna('Unknown College')
-
-# --- 4. THE AUTO-ELIMINATION ENGINE (LIVE ESPN FEED) ---
 @st.cache_data(ttl=120)
 def get_eliminated_teams():
+    """Scrapes the live ESPN scoreboard to find teams that have officially lost."""
     eliminated = []
-    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
     
-    for date_str in tourney_dates:
+    for date_str in TOURNEY_DATES:
         url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
         try:
             data = requests.get(url).json()
             for event in data.get('events', []):
                 comp = event['competitions'][0]
+                
+                # Check if the game is completely finished
                 if comp['status']['type']['completed']: 
                     for team in comp['competitors']:
+                        # If winner flag is False, the team is eliminated
                         if team.get('winner') == False:
                             eliminated.append(team['team']['displayName'])
-                            eliminated.append(team['team']['shortDisplayName']) # Catch both name formats
+                            eliminated.append(team['team']['shortDisplayName']) 
         except:
-            pass
+            continue
             
     return list(set(eliminated))
 
-eliminated_teams = get_eliminated_teams()
-
-# --- 5. PLAYER DATA ENGINE (LIVE ESPN FEED) ---
 @st.cache_data(ttl=60)
 def pull_tournament_stats():
+    """Scrapes the live ESPN box scores to calculate fantasy points for all active players."""
     all_player_stats = []
-    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
     
-    for date_str in tourney_dates:
+    for date_str in TOURNEY_DATES:
         schedule_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
         try:
             sched_data = requests.get(schedule_url).json()
@@ -94,6 +98,7 @@ def pull_tournament_stats():
             for game in events:
                 status = game['competitions'][0]['status']['type']['description']
                 
+                # Only pull stats if the game has actually tipped off
                 if status != "Scheduled":
                     game_id = game['id']
                     summary_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}"
@@ -102,6 +107,7 @@ def pull_tournament_stats():
                         summary_data = requests.get(summary_url).json()
                         if 'boxscore' in summary_data and 'players' in summary_data['boxscore']:
                             for team in summary_data['boxscore']['players']:
+                                # Skip teams that haven't registered any stats yet
                                 if not team.get('statistics'):
                                     continue
                                     
@@ -140,10 +146,20 @@ def pull_tournament_stats():
     else:
         return pd.DataFrame(columns=['athlete_display_name', 'points', 'rebounds', 'assists', 'fantasy_pts', 'game_id'])
 
+# --- 4. EXECUTE DATA FETCHING ---
+roster_base = load_rosters()
+college_map = build_college_dictionary()
+eliminated_teams = get_eliminated_teams()
 live_data = pull_tournament_stats()
 
-# --- 6. PROCESSING & LEADERBOARD ---
+# Apply the automated colleges to the CSV roster
 if not roster_base.empty:
+    roster_base['College'] = roster_base['Player'].map(college_map).fillna('Unknown College')
+
+# --- 5. DATA MERGING & MATH ---
+if not roster_base.empty:
+    
+    # Calculate total points per player
     if not live_data.empty:
         drafted_df = live_data[live_data['athlete_display_name'].isin(roster_base['Player'])].copy()
         
@@ -161,58 +177,60 @@ if not roster_base.empty:
     else:
         player_stats = pd.DataFrame(columns=['Player', 'Games_Played', 'Total_Pts', 'Total_Reb', 'Total_Ast', 'Tourney_Score'])
 
+    # Merge stats back onto the main roster
     full_player_totals = pd.merge(roster_base, player_stats, on='Player', how='left')
     
     full_player_totals.fillna({
-        'Games_Played': 0,
-        'Total_Pts': 0,
-        'Total_Reb': 0,
-        'Total_Ast': 0,
-        'Tourney_Score': 0
+        'Games_Played': 0, 'Total_Pts': 0, 'Total_Reb': 0, 'Total_Ast': 0, 'Tourney_Score': 0
     }, inplace=True)
 
     stat_columns = ['Games_Played', 'Total_Pts', 'Total_Reb', 'Total_Ast', 'Tourney_Score']
     full_player_totals[stat_columns] = full_player_totals[stat_columns].astype(int)
 
-    # Check eliminations against the automatically assigned college!
+    # Check eliminations against the automatically assigned college
     full_player_totals['Status'] = full_player_totals['College'].apply(
         lambda x: "❌ Eliminated" if x in eliminated_teams else "✅ Active"
     )
 
+    # Calculate Overall Leaderboard
     leaderboard = full_player_totals.groupby('Fantasy Owner')['Tourney_Score'].sum().reset_index()
     leaderboard = leaderboard.sort_values(by='Tourney_Score', ascending=False).reset_index(drop=True)
-    leaderboard.index += 1 
     
-    # --- 7. DRAW THE WEB PAGE ---
+    # Format the Leaderboard
+    leaderboard.insert(0, 'Rank', range(1, len(leaderboard) + 1))
+    leaderboard = leaderboard.rename(columns={'Fantasy Owner': 'Manager', 'Tourney_Score': 'Total Points'})
+
+    # --- 6. DRAW THE WEB PAGE ---
     st.header("👑 Overall Leaderboard")
-    st.dataframe(
-        leaderboard,
-        width='stretch', 
-        hide_index=False
-    )
+    
+    # Float the leaderboard in the center using columns
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.dataframe(
+            leaderboard,
+            hide_index=True,
+            use_container_width=True
+        )
             
     st.divider()
     
     st.header("📊 Fantasy Team Rosters")
-    for owner in leaderboard['Fantasy Owner']:
+    for owner in leaderboard['Manager']:
         
-        # Grab the specific team
+        # Isolate the roster for the specific manager
         team_slice = full_player_totals[full_player_totals['Fantasy Owner'] == owner].copy()
         
-        # --- NEW: Calculate remaining players ---
         total_players = len(team_slice)
         active_players = len(team_slice[team_slice['Status'] == '✅ Active'])
-        # ----------------------------------------
         
-        # Update the expander title with the survival count
+        # Build the interactive expander
         with st.expander(f"View roster for {owner} ({active_players}/{total_players} Active)"):
             
-            # --- UPDATED: Group by Status first (Active on top), then rank by Points (Highest to lowest) ---
+            # Sort: Active on top, then rank by Points
             team_slice = team_slice.sort_values(by=['Status', 'Tourney_Score'], ascending=[True, False])
-            # -----------------------------------------------------------------------------------------------
-            
             display_slice = team_slice.drop(columns=['Fantasy Owner'])
             
+            # Highlight eliminated rows in red
             def highlight_eliminated(row):
                 return ['color: #ff4b4b;' if (col == 'Player' and row['Status'] == '❌ Eliminated') else '' for col in row.index]
             
@@ -222,3 +240,7 @@ if not roster_base.empty:
 else:
     st.warning("Please create your 'rosters.csv' file with Player and Fantasy Team columns.")
 
+# --- 7. AUTO-REFRESH ENGINE ---
+# Automatically reloads the page every 60 seconds to pull live data without manual refreshing
+#time.sleep(60)
+#st.rerun()
