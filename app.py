@@ -59,11 +59,7 @@ if not roster_base.empty:
 @st.cache_data(ttl=120)
 def get_eliminated_teams():
     eliminated = []
-    tourney_dates = [
-        '20260319', '20260320', '20260321', '20260322', 
-        '20260326', '20260327', '20260328', '20260329', 
-        '20260404', '20260406'
-    ]
+    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
     
     for date_str in tourney_dates:
         url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
@@ -87,11 +83,7 @@ eliminated_teams = get_eliminated_teams()
 @st.cache_data(ttl=60)
 def pull_tournament_stats():
     all_player_stats = []
-    tourney_dates = [
-        '20260319', '20260320', '20260321', '20260322', 
-        '20260326', '20260327', '20260328', '20260329', 
-        '20260404', '20260406'
-    ]
+    tourney_dates = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
     
     for date_str in tourney_dates:
         schedule_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={date_str}"
@@ -203,10 +195,22 @@ if not roster_base.empty:
     
     st.header("📊 Fantasy Team Rosters")
     for owner in leaderboard['Fantasy Owner']:
-        with st.expander(f"View roster for {owner}"):
+        
+        # Grab the specific team
+        team_slice = full_player_totals[full_player_totals['Fantasy Owner'] == owner].copy()
+        
+        # --- NEW: Calculate remaining players ---
+        total_players = len(team_slice)
+        active_players = len(team_slice[team_slice['Status'] == '✅ Active'])
+        # ----------------------------------------
+        
+        # Update the expander title with the survival count
+        with st.expander(f"View roster for {owner} ({active_players}/{total_players} Active)"):
             
-            team_slice = full_player_totals[full_player_totals['Fantasy Owner'] == owner].copy()
-            team_slice = team_slice.sort_values(by=['Status', 'Tourney_Score'], ascending=[False, False])
+            # --- UPDATED: Group by Status first (Active on top), then rank by Points (Highest to lowest) ---
+            team_slice = team_slice.sort_values(by=['Status', 'Tourney_Score'], ascending=[True, False])
+            # -----------------------------------------------------------------------------------------------
+            
             display_slice = team_slice.drop(columns=['Fantasy Owner'])
             
             def highlight_eliminated(row):
@@ -217,3 +221,4 @@ if not roster_base.empty:
 
 else:
     st.warning("Please create your 'rosters.csv' file with Player and Fantasy Team columns.")
+
